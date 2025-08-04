@@ -1,11 +1,16 @@
 {
   "name": "smtp-server",
   "version": "1.0.0",
-  "description": "Node.js Fastify backend for sending emails via SMTP",
+  "description": "Self-hosted SMTP server for unlimited email sending",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "docker:build": "docker build -t smtp-server .",
+    "docker:run": "docker run -p 3000:3000 --env-file .env smtp-server",
+    "docker:compose": "docker-compose up -d",
+    "docker:logs": "docker-compose logs -f",
+    "docker:stop": "docker-compose down"
   },
   "keywords": ["fastify", "smtp", "email", "nodemailer"],
   "author": "",
