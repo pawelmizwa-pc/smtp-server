@@ -1,31 +1,65 @@
+// ====================
+// Dependencies
+// ====================
 require("dotenv").config();
 const fastify = require("fastify")({ logger: true });
 const nodemailer = require("nodemailer");
 
-// Register CORS plugin
+// ====================
+// Configuration
+// ====================
+const CONFIG = {
+  // Server Configuration
+  PORT: process.env.PORT || 3000,
+  HOST: process.env.HOST || "0.0.0.0",
+  
+  // SMTP Configuration
+  SMTP: {
+    HOST: process.env.SMTP_HOST || "localhost",
+    PORT: process.env.SMTP_PORT || 587,
+    SECURE: process.env.SMTP_SECURE === "true",
+    USER: process.env.SMTP_USER,
+    PASSWORD: process.env.SMTP_PASSWORD,
+    FROM: process.env.SMTP_FROM || process.env.SMTP_USER,
+    REJECT_UNAUTHORIZED: process.env.SMTP_REJECT_UNAUTHORIZED !== "false",
+  },
+  
+  // Rate Limiting Configuration
+  RATE_LIMITING: {
+    SMTP_RATE_LIMIT: parseInt(process.env.SMTP_RATE_LIMIT) || 1000, // milliseconds between emails
+    RETRY_DELAY: parseInt(process.env.RETRY_DELAY) || 30000, // 30 seconds
+  },
+};
+
+// ====================
+// Application State
+// ====================
+const emailQueue = [];
+let isProcessingQueue = false;
+let lastEmailTime = 0;
+
+// ====================
+// Fastify Plugins
+// ====================
 fastify.register(require("@fastify/cors"), {
   origin: true,
 });
 
-// Rate limiting for SMTP server
-const emailQueue = [];
-let isProcessingQueue = false;
-const SMTP_RATE_LIMIT = process.env.SMTP_RATE_LIMIT || 1000; // milliseconds between emails (default 1 second)
-let lastEmailTime = 0;
-
-// SMTP Configuration - Self-hosted or custom SMTP
+// ====================
+// SMTP Transporter Setup
+// ====================
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "localhost",
-  port: process.env.SMTP_PORT || 587,
-  secure: process.env.SMTP_SECURE === "true", // true for 465, false for other ports
-  auth: process.env.SMTP_USER
+  host: CONFIG.SMTP.HOST,
+  port: CONFIG.SMTP.PORT,
+  secure: CONFIG.SMTP.SECURE,
+  auth: CONFIG.SMTP.USER
     ? {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASSWORD,
+        user: CONFIG.SMTP.USER,
+        pass: CONFIG.SMTP.PASSWORD,
       }
-    : false, // No auth for local server
+    : false,
   tls: {
-    rejectUnauthorized: process.env.SMTP_REJECT_UNAUTHORIZED !== "false",
+    rejectUnauthorized: CONFIG.SMTP.REJECT_UNAUTHORIZED,
   },
 });
 
@@ -38,7 +72,13 @@ transporter.verify((error, success) => {
   }
 });
 
-// Queue processing function
+// ====================
+// Email Queue Functions
+// ====================
+
+/**
+ * Process emails from the queue with rate limiting
+ */
 async function processEmailQueue() {
   if (isProcessingQueue || emailQueue.length === 0) {
     return;
@@ -53,8 +93,8 @@ async function processEmailQueue() {
     const timeSinceLastEmail = now - lastEmailTime;
 
     // Rate limiting: wait if needed
-    if (timeSinceLastEmail < SMTP_RATE_LIMIT) {
-      const waitTime = SMTP_RATE_LIMIT - timeSinceLastEmail;
+    if (timeSinceLastEmail < CONFIG.RATE_LIMITING.SMTP_RATE_LIMIT) {
+      const waitTime = CONFIG.RATE_LIMITING.SMTP_RATE_LIMIT - timeSinceLastEmail;
       console.log(`Rate limiting: waiting ${waitTime}ms before next email`);
       await new Promise((resolve) => setTimeout(resolve, waitTime));
     }
@@ -82,8 +122,8 @@ async function processEmailQueue() {
         // Put the email back in queue with delay
         emailQueue.unshift(emailJob);
         await new Promise((resolve) =>
-          setTimeout(resolve, parseInt(process.env.RETRY_DELAY) || 30000)
-        ); // configurable delay
+          setTimeout(resolve, CONFIG.RATE_LIMITING.RETRY_DELAY)
+        );
         continue;
       }
 
@@ -99,7 +139,9 @@ async function processEmailQueue() {
   console.log("Email queue processing completed.");
 }
 
-// Queue email function
+/**
+ * Add email to queue for processing
+ */
 function queueEmail(mailOptions) {
   return new Promise((resolve, reject) => {
     const emailJob = {
@@ -120,22 +162,38 @@ function queueEmail(mailOptions) {
   });
 }
 
-// Health check endpoint
+// ====================
+// API Routes
+// ====================
+
+/**
+ * Health check endpoint
+ * GET /health
+ */
 fastify.get("/health", async (request, reply) => {
-  return { status: "OK", message: "SMTP server is running" };
+  return { 
+    status: "OK", 
+    message: "SMTP server is running" 
+  };
 });
 
-// Queue status endpoint
+/**
+ * Queue status endpoint
+ * GET /queue-status
+ */
 fastify.get("/queue-status", async (request, reply) => {
   return {
     queueLength: emailQueue.length,
     isProcessing: isProcessingQueue,
     lastEmailTime: lastEmailTime,
-    rateLimitMs: SMTP_RATE_LIMIT,
+    rateLimitMs: CONFIG.RATE_LIMITING.SMTP_RATE_LIMIT,
   };
 });
 
-// Send email endpoint
+/**
+ * Send single email endpoint
+ * POST /send-email
+ */
 fastify.post("/send-email", async (request, reply) => {
   try {
     const { to, subject, text, html, from } = request.body;
@@ -149,7 +207,7 @@ fastify.post("/send-email", async (request, reply) => {
 
     // Email options
     const mailOptions = {
-      from: from || process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: from || CONFIG.SMTP.FROM,
       to: Array.isArray(to) ? to.join(", ") : to,
       subject: subject,
       text: text,
@@ -169,7 +227,10 @@ fastify.post("/send-email", async (request, reply) => {
   }
 });
 
-// Send bulk emails endpoint
+/**
+ * Send bulk emails endpoint
+ * POST /send-bulk-email
+ */
 fastify.post("/send-bulk-email", async (request, reply) => {
   try {
     const { recipients, subject, text, html, from } = request.body;
@@ -194,7 +255,7 @@ fastify.post("/send-bulk-email", async (request, reply) => {
     const emailPromises = recipients.map(async (recipient, index) => {
       try {
         const mailOptions = {
-          from: from || process.env.SMTP_FROM || process.env.SMTP_USER,
+          from: from || CONFIG.SMTP.FROM,
           to: recipient,
           subject: subject,
           text: text,
@@ -253,7 +314,10 @@ fastify.post("/send-bulk-email", async (request, reply) => {
   }
 });
 
-// Send email with attachments endpoint
+/**
+ * Send email with attachments endpoint
+ * POST /send-email-with-attachments
+ */
 fastify.post("/send-email-with-attachments", async (request, reply) => {
   try {
     const { to, subject, text, html, from, attachments } = request.body;
@@ -267,7 +331,7 @@ fastify.post("/send-email-with-attachments", async (request, reply) => {
 
     // Email options
     const mailOptions = {
-      from: from || process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: from || CONFIG.SMTP.FROM,
       to: Array.isArray(to) ? to.join(", ") : to,
       subject: subject,
       text: text,
@@ -301,18 +365,22 @@ fastify.post("/send-email-with-attachments", async (request, reply) => {
   }
 });
 
-// Start the server
+// ====================
+// Server Initialization
+// ====================
 const start = async () => {
   try {
-    const port = process.env.PORT || 3000;
-    const host = process.env.HOST || "0.0.0.0";
-
-    await fastify.listen({ port, host });
-    console.log(`Server running on http://${host}:${port}`);
+    await fastify.listen({ 
+      port: CONFIG.PORT, 
+      host: CONFIG.HOST 
+    });
+    
+    console.log(`Server running on http://${CONFIG.HOST}:${CONFIG.PORT}`);
   } catch (err) {
     console.error("Error starting server:", err);
     process.exit(1);
   }
 };
 
+// Start the server
 start();
